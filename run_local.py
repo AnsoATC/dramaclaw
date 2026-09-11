@@ -186,6 +186,28 @@ def check_comfyui(address: str) -> Tuple[bool, str]:
     return False, "Connection failed"
 
 
+def check_image_server(address: str = "http://127.0.0.1:8001") -> Tuple[bool, str]:
+    """Check if the local image bridge server (port 8001) is responding."""
+    url = address if address.startswith("http") else f"http://{address}"
+    url_base = url.rstrip("/")
+    if url_base.endswith("/v1"):
+        url_base = url_base[:-3]
+    health_endpoint = f"{url_base}/health"
+    try:
+        req = urllib.request.Request(
+            health_endpoint,
+            headers={"User-Agent": "DramaClaw-HealthCheck"},
+        )
+        with urllib.request.urlopen(req, timeout=1.5) as resp:
+            if resp.status == 200:
+                data = json.loads(resp.read().decode("utf-8"))
+                engine = data.get("engine", "Local")
+                return True, f"Online ({engine} - Ready for 9:16 vertical images)"
+    except Exception as e:
+        return False, str(e)
+    return False, "Connection failed"
+
+
 def terminate_process_tree(proc: subprocess.Popen) -> None:
     """Cleanly terminate a process and all its child processes."""
     if proc.poll() is not None:
@@ -300,7 +322,11 @@ def run_preflight_checks(env_vars: Dict[str, str], backend_port: int, frontend_p
         log_warn("Install FFmpeg (e.g. via 'winget install Gyan.FFmpeg') and ensure ffmpeg is in PATH.")
 
     # Ollama check
-    ollama_url = env_vars.get("NEWAPI_BASE_URL", "http://localhost:11434/v1")
+    ollama_url = (
+        env_vars.get("OLLAMA_BASE_URL")
+        or env_vars.get("MODEL_BASE_URL")
+        or "http://localhost:11434/v1"
+    )
     ollama_ok, ollama_info = check_ollama(ollama_url)
     if ollama_ok:
         log_ok(f"Ollama LLM Gateway ({ollama_url}): {ollama_info}")
@@ -309,6 +335,15 @@ def run_preflight_checks(env_vars: Dict[str, str], backend_port: int, frontend_p
         print(f"    {YELLOW}↳ Action required if using local LLM:{RESET}")
         print(f"      1. Start Ollama in a separate terminal: {BOLD}ollama serve{RESET}")
         print(f"      2. Pull model if needed: {BOLD}ollama pull {model_name}{RESET}")
+
+    # Local Image Bridge check (port 8001)
+    img_url = env_vars.get("NEWAPI_BASE_URL", "http://127.0.0.1:8001/v1")
+    img_ok, img_info = check_image_server(img_url)
+    if img_ok:
+        log_ok(f"Local Image Bridge ({img_url}): {img_info}")
+    else:
+        log_warn(f"Local Image Bridge is offline or unreachable at {img_url}")
+        print(f"    {YELLOW}↳ Tip: Start image bridge via: python scripts/local_image_server.py --port 8001{RESET}")
 
     # ComfyUI check
     comfyui_addr = env_vars.get("COMFYUI_ADDRESS", "127.0.0.1:8188")

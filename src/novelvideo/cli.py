@@ -4,15 +4,22 @@ import asyncio
 import json
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 import typer
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.table import Table
 
 from novelvideo.backup.cli import backup_app
 from novelvideo.cognee import CogneeStore
-from novelvideo.config import ensure_project_dirs
+from novelvideo.config import ensure_project_dirs, get_edge_voice
+from novelvideo.models import (
+    NovelCharacter,
+    NovelEpisode,
+    NovelScene,
+    NovelVisualBeat,
+)
 from novelvideo.workflows.script_writing import create_script_writing_workflow
 from novelvideo.generators import (
     SceneAsset,
@@ -289,17 +296,326 @@ def cognee_search(
     console.print(result)
 
 
+def _call_ollama_for_screenplay(
+    prompt: str,
+    language: str = "fr",
+) -> dict[str, Any]:
+    """Query local Ollama instance for a structured dramatic screenplay."""
+    import urllib.request
+    import urllib.error
+
+    lang_map = {
+        "fr": "French (Français)",
+        "en": "English",
+        "zh": "Chinese (中文)",
+    }
+    lang_label = lang_map.get(language.lower().strip()[:2], language)
+
+    ollama_url = (
+        os.environ.get("OLLAMA_BASE_URL")
+        or os.environ.get("MODEL_BASE_URL")
+        or "http://localhost:11434/v1"
+    ).rstrip("/")
+    if not ollama_url.endswith("/v1"):
+        ollama_url = f"{ollama_url}/v1"
+    endpoint = f"{ollama_url}/chat/completions"
+
+    model_name = os.environ.get("MODEL_NAME", "qwen2.5:14b-instruct")
+
+    system_prompt = (
+        "You are an expert dramatic screenwriter and storyboard director.\n"
+        f"Create a compelling, detailed 3 to 4 scene screenplay based on the user prompt.\n"
+        f"IMPORTANT LANGUAGE REQUIREMENT: All character profiles, synopses, narrations, and dialogues MUST be in {lang_label}.\n"
+        "Visual descriptions and environment prompts MUST be in English for photorealistic visual generation.\n\n"
+        "You MUST respond ONLY with a valid JSON object matching this schema (no markdown fences, no explanatory text):\n"
+        "{\n"
+        '  "title": "Screenplay Title",\n'
+        '  "synopsis": "1-2 sentence dramatic summary",\n'
+        '  "characters": [\n'
+        '    {\n'
+        '      "name": "Character Name (e.g. Julien)",\n'
+        '      "role": "lead / supporting / protagonist",\n'
+        '      "gender": "male / female",\n'
+        '      "age_group": "youth / adult / elder",\n'
+        '      "description": "Character background in the requested language",\n'
+        '      "face_prompt": "Cinematic visual description in English for image generation",\n'
+        '      "voice_id": "fr-FR-HenriNeural or fr-FR-VivienneNeural or en-US-ChristopherNeural"\n'
+        "    }\n"
+        "  ],\n"
+        '  "scenes": [\n'
+        '    {\n'
+        '      "name": "Scene Name (e.g. Bibliothèque ancienne)",\n'
+        '      "scene_type": "interior / exterior",\n'
+        '      "time_of_day": "night / day / dusk / dawn",\n'
+        '      "environment_prompt": "Cinematic environment description in English",\n'
+        '      "description": "Scene atmosphere description in requested language"\n'
+        "    }\n"
+        "  ],\n"
+        '  "beats": [\n'
+        '    {\n'
+        '      "beat_number": 1,\n'
+        '      "scene_name": "Bibliothèque ancienne",\n'
+        '      "speaker": "Julien",\n'
+        '      "audio_type": "dialogue or narration",\n'
+        '      "narration": "Exact text in requested language to be spoken aloud via TTS",\n'
+        '      "visual_description": "Detailed cinematic storyboard description in English with {{Character:Character_default}}"\n'
+        "    }\n"
+        "  ]\n"
+        "}"
+    )
+
+    user_msg = f"Write a dramatic 3 to 4 scene screenplay based on this prompt:\n\"{prompt}\"\nTarget Language: {lang_label}"
+
+    req_payload = {
+        "model": model_name,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_msg},
+        ],
+        "temperature": 0.7,
+    }
+
+    req = urllib.request.Request(
+        endpoint,
+        headers={"Content-Type": "application/json"},
+        data=json.dumps(req_payload).encode("utf-8"),
+    )
+
+    with urllib.request.urlopen(req, timeout=90) as response:
+        res_data = json.loads(response.read().decode("utf-8"))
+        raw_content = res_data["choices"][0]["message"]["content"].strip()
+
+    # Strip code fences if model returned them
+    if raw_content.startswith("```"):
+        lines = raw_content.splitlines()
+        if lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        raw_content = "\n".join(lines).strip()
+
+    # Parse JSON with strict=False to tolerate unescaped newlines/tabs in LLM text
+    try:
+        data = json.loads(raw_content, strict=False)
+    except Exception:
+        # Fallback regex extraction of first JSON block
+        import re
+        m = re.search(r"(\{.*\})", raw_content, re.DOTALL)
+        if m:
+            data = json.loads(m.group(1), strict=False)
+        else:
+            raise ValueError(f"Failed to parse JSON response from Ollama: {raw_content[:200]}")
+
+    return data
+
+
 @app.command()
 def generate_script(
-    project: str = typer.Option(..., "--project", "-p", help="项目名称"),
-    episode: int = typer.Option(..., "--episode", "-e", help="要生成的集数"),
+    project: Optional[str] = typer.Option(None, "--project", "-p", help="项目名称（若由 prompt 生成可自动命名）"),
+    episode: int = typer.Option(1, "--episode", "-e", help="要生成的集数"),
+    prompt: Optional[str] = typer.Option(None, "--prompt", help="故事/剧本提示词（使用本地 Ollama/LLM 自动化撰写 3-4 场景剧本）"),
+    language: str = typer.Option("fr", "--language", "-l", help="剧本与角色语言 (fr / en / zh)"),
     target_duration: float = typer.Option(60.0, "--duration", "-d", help="目标视频时长(秒)"),
     output_file: Optional[str] = typer.Option(
         None, "--output", "-o", help="已废弃：脚本只写入 SQLite"
     ),
 ):
-    """生成单集解说词脚本（Cognee 版）。"""
+    """生成单集解说词脚本或由 Ollama Prompt 自动撰写完整剧本。"""
     _ensure_nest_asyncio()
+
+    if prompt:
+        # Mode A: Automated screenplay writing from natural language prompt via Ollama
+        project_name = project or "detective_secret_door"
+        console.print(f"[bold cyan]🎬 DRAMACLAW: SCRIPT GENERATION VIA OLLAMA[/bold cyan]")
+        console.print(f"  [bold]Prompt:[/bold] \"{prompt}\"")
+        console.print(f"  [bold]Language:[/bold] {language.upper()}")
+        console.print(f"  [bold]Target Project:[/bold] {project_name}")
+
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            console=console,
+        ) as progress:
+            task = progress.add_task("Querying Ollama LLM (qwen2.5:14b-instruct)...", total=None)
+            try:
+                screenplay_data = _call_ollama_for_screenplay(prompt, language=language)
+                progress.update(task, description="[green]✓ Screenplay synthesized by Ollama![/green]")
+            except Exception as e:
+                console.print(f"[red]❌ Ollama generation failed: {e}[/red]")
+                raise typer.Exit(1)
+
+        async def do_persist_screenplay():
+            from novelvideo.knowledge_pipeline import KNOWLEDGE_PIPELINE_KEY, KNOWLEDGE_PIPELINE_STRUCTURED
+            from novelvideo.sqlite_store import SQLiteStore
+
+            dirs = ensure_project_dirs(project_name)
+            store = SQLiteStore(project_name)
+            await store.initialize()
+
+            # Record structured_v1 in project_config.json so any future store calls use structured track
+            config_path = Path(store.state_dir) / "project_config.json"
+            cfg = {}
+            if config_path.exists():
+                try:
+                    cfg = json.loads(config_path.read_text(encoding="utf-8"))
+                except Exception:
+                    cfg = {}
+            cfg[KNOWLEDGE_PIPELINE_KEY] = KNOWLEDGE_PIPELINE_STRUCTURED
+            config_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+            try:
+
+                # 1. Characters
+                chars_data = screenplay_data.get("characters", [])
+                for c in chars_data:
+                    c_name = c.get("name", "Lead")
+                    c_role = c.get("role", "lead")
+                    c_gender = c.get("gender", "male")
+                    c_desc = c.get("description", "")
+                    c_face = c.get("face_prompt", "")
+                    voice = c.get("voice_id") or get_edge_voice(language, gender=c_gender, role=c_role)
+                    char_obj = NovelCharacter(
+                        name=c_name,
+                        role=c_role,
+                        gender=c_gender,
+                        age_group=c.get("age_group", "youth"),
+                        description=c_desc,
+                        face_prompt=c_face,
+                        fish_voice_id=voice,
+                    )
+                    await store.add_character(char_obj)
+
+                # 2. Scenes
+                scenes_data = screenplay_data.get("scenes", [])
+                for s in scenes_data:
+                    s_name = s.get("name", "Scene")
+                    scene_obj = NovelScene(
+                        name=s_name,
+                        scene_type=s.get("scene_type", "interior"),
+                        time_of_day=s.get("time_of_day", "夜"),
+                        environment_prompt=s.get("environment_prompt", ""),
+                        description=s.get("description", ""),
+                    )
+                    await store.add_scene(scene_obj)
+
+                # 3. Episode & Beats
+                beats_data = screenplay_data.get("beats", [])
+                full_screenplay_text = f"# {screenplay_data.get('title', 'Screenplay')}\n\n"
+                full_screenplay_text += f"{screenplay_data.get('synopsis', '')}\n\n"
+                for b in beats_data:
+                    b_speaker = b.get("speaker", "")
+                    b_narration = b.get("narration", "")
+                    full_screenplay_text += f"[{b.get('scene_name', '')}] {b_speaker}: {b_narration}\n"
+
+                ep_obj = NovelEpisode(
+                    number=episode,
+                    title=screenplay_data.get("title", f"Épisode {episode}"),
+                    content_summary=screenplay_data.get("synopsis", ""),
+                    character_names=[c.get("name", "") for c in chars_data],
+                    identity_ids=[f"{c.get('name', '')}_default" for c in chars_data],
+                    raw_content=full_screenplay_text,
+                    adapted_content=full_screenplay_text,
+                    beat_source_text=full_screenplay_text,
+                )
+                await store.add_episode(ep_obj)
+
+                visual_beats = []
+                for idx, b in enumerate(beats_data, start=1):
+                    b_num = int(b.get("beat_number") or idx)
+                    b_narr = str(b.get("narration") or "").strip()
+                    b_vis = str(b.get("visual_description") or "").strip()
+                    b_audio = str(b.get("audio_type") or "narration").lower()
+                    b_spk = str(b.get("speaker") or "").strip()
+                    visual_beats.append(
+                        NovelVisualBeat(
+                            episode_number=episode,
+                            beat_number=b_num,
+                            narration=b_narr or "(silence)",
+                            visual_description=b_vis or "Cinematic scene",
+                            audio_type="dialogue" if b_audio in ("dialogue", "speech") else "narration",
+                            speaker=b_spk,
+                            time_of_day=str(b.get("time_of_day", "夜")),
+                        )
+                    )
+                await store.add_visual_beats(visual_beats)
+
+                # 4. Verification Assertions from Database
+                db_chars = await store.list_characters()
+                db_scenes = await store.list_scenes()
+                db_beats = await store.get_beats_for_episode(episode)
+                db_ep = store.get_episode(episode)
+
+                assert len(db_chars) >= 1, "Database assertion failed: No characters found in SQLite"
+                assert len(db_scenes) >= 1, "Database assertion failed: No scenes found in SQLite"
+                assert len(db_beats) >= 3, f"Database assertion failed: Expected >=3 beats, got {len(db_beats)}"
+                assert any(b.audio_type == "dialogue" or b.speaker for b in db_beats), "Database assertion failed: No dialogue/speaker extracted"
+
+                return {
+                    "title": ep_obj.title,
+                    "synopsis": ep_obj.content_summary,
+                    "characters": db_chars,
+                    "scenes": db_scenes,
+                    "beats": db_beats,
+                    "db_path": getattr(store, "db_path", str(Path(dirs.get("base", ".")) / "data.db")),
+                }
+            finally:
+                await store.close()
+
+        try:
+            persisted = asyncio.run(do_persist_screenplay())
+        except Exception as e:
+            console.print(f"[red]❌ Database persistence failed: {e}[/red]")
+            raise typer.Exit(1)
+
+        # Render Rich Tables
+        console.print(f"\n[bold green]✓ Screenplay Stored in Project Database: {persisted['db_path']}[/bold green]")
+        console.print(f"[bold yellow]Title:[/bold yellow] {persisted['title']}")
+        console.print(f"[dim]Synopsis: {persisted['synopsis']}[/dim]\n")
+
+        # Characters Table
+        char_table = Table(title="[bold]Extracted Character Profiles[/bold]")
+        char_table.add_column("Character", style="cyan")
+        char_table.add_column("Role", style="green")
+        char_table.add_column("Voice ID", style="magenta")
+        char_table.add_column("Profile / Description", style="dim")
+        for ch in persisted["characters"]:
+            char_table.add_row(ch.name, ch.role, ch.fish_voice_id or "default", ch.description[:80])
+        console.print(char_table)
+
+        # Scenes Table
+        scene_table = Table(title="[bold]Extracted Scenes & Locations[/bold]")
+        scene_table.add_column("Scene Location", style="cyan")
+        scene_table.add_column("Type", style="green")
+        scene_table.add_column("Time of Day", style="yellow")
+        scene_table.add_column("Visual Environment Prompt", style="dim")
+        for sc in persisted["scenes"]:
+            scene_table.add_row(sc.name, sc.scene_type, sc.time_of_day, (sc.environment_prompt or sc.description)[:80])
+        console.print(scene_table)
+
+        # Beats Table
+        beat_table = Table(title=f"[bold]Extracted Storyboard Beats (Episode {episode})[/bold]")
+        beat_table.add_column("Beat #", style="bold cyan", justify="right")
+        beat_table.add_column("Type", style="yellow")
+        beat_table.add_column("Speaker", style="magenta")
+        beat_table.add_column("Spoken Text (TTS)", style="white")
+        beat_table.add_column("Visual Frame Description", style="dim")
+        for bt in persisted["beats"]:
+            beat_table.add_row(
+                str(bt.beat_number),
+                bt.audio_type.upper(),
+                bt.speaker or "-",
+                bt.narration[:70],
+                bt.visual_description[:70],
+            )
+        console.print(beat_table)
+
+        console.print(f"\n[bold green]✓ Database assertions passed: {len(persisted['characters'])} characters, {len(persisted['scenes'])} scenes, {len(persisted['beats'])} beats fully verified in SQLite.[/bold green]")
+        return
+
+    # Mode B: Existing legacy workflow from graph planning
+    if not project:
+        console.print("[red]错误: 请提供 --project 参数，或者提供 --prompt 参数自动生成脚本[/red]")
+        raise typer.Exit(1)
+
     console.print(f"[bold blue]生成脚本[/bold blue]: {project} 第 {episode} 集")
 
     async def do_generate():
