@@ -118,11 +118,61 @@ def find_python_executable() -> str:
     return sys.executable
 
 
+def find_image_python(engine: str = "fast", default_python: str = sys.executable) -> str:
+    """Find Python interpreter for image server, preferring an env with diffusers/torch if diffusion mode."""
+    if engine != "diffusion":
+        return default_python
+
+    candidates = [
+        default_python,
+        str(Path.home() / "miniconda3" / "envs" / "story_flux" / ("python.exe" if sys.platform == "win32" else "bin/python")),
+        str(Path.home() / "miniconda3" / "envs" / "dramaclaw_env" / ("python.exe" if sys.platform == "win32" else "bin/python")),
+    ]
+    for cand in candidates:
+        if cand and Path(cand).is_file():
+            try:
+                res = subprocess.run(
+                    [cand, "-c", "import torch, diffusers; print('ok' if torch.cuda.is_available() else 'no_cuda')"],
+                    capture_output=True,
+                    text=True,
+                    timeout=4,
+                )
+                if res.returncode == 0 and "ok" in res.stdout:
+                    return cand
+            except Exception:
+                continue
+    return default_python
+
+
 def is_port_in_use(port: int, host: str = "127.0.0.1") -> bool:
     """Check if a network port is already in use."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.settimeout(0.5)
         return s.connect_ex((host, port)) == 0
+
+
+def free_port_if_in_use(port: int) -> None:
+    """If a stale process is listening on the port, attempt to terminate it cleanly on Windows."""
+    if not is_port_in_use(port):
+        return
+    if sys.platform == "win32":
+        try:
+            res = subprocess.run(
+                ["netstat", "-ano"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            for line in res.stdout.splitlines():
+                if f":{port}" in line and "LISTENING" in line:
+                    parts = line.strip().split()
+                    pid = parts[-1]
+                    if pid.isdigit() and int(pid) != os.getpid():
+                        log_info(f"Port {port} is occupied by stale process PID {pid}. Terminating it...")
+                        subprocess.run(["taskkill", "/PID", pid, "/F"], capture_output=True, check=False)
+                        time.sleep(0.5)
+        except Exception:
+            pass
 
 
 def check_ffmpeg() -> Tuple[bool, str]:
@@ -278,7 +328,14 @@ def print_banner() -> None:
     print(banner)
 
 
-def run_preflight_checks(env_vars: Dict[str, str], backend_port: int, frontend_port: int) -> bool:
+def run_preflight_checks(
+    env_vars: Dict[str, str],
+    backend_port: int,
+    frontend_port: int,
+    image_port: int = 8001,
+    image_engine: str = "fast",
+    check_only: bool = False,
+) -> bool:
     """Execute all pre-flight service checks."""
     print(f"{BOLD}--- [1/3] System & Environment Health Checks ---{RESET}")
 
@@ -303,12 +360,12 @@ def run_preflight_checks(env_vars: Dict[str, str], backend_port: int, frontend_p
     tts_provider = env_vars.get("TTS_PROVIDER", "edge")
     tts_voice = env_vars.get("EDGE_TTS_VOICE", "zh-CN-YunxiNeural")
     video_backend = env_vars.get("VIDEO_BACKEND", "comfyui")
-    image_model = env_vars.get("NEWAPI_IMAGE_MODEL", "sdxl-turbo")
+    image_model = env_vars.get("LOCAL_DIFFUSION_MODEL", env_vars.get("NEWAPI_IMAGE_MODEL", "sdxl-turbo"))
 
     print(f"    - Edition:        {CYAN}{edition.upper()}{RESET}")
     print(f"    - Text LLM:       {CYAN}{model_name}{RESET}")
     print(f"    - Audio TTS:      {CYAN}{tts_provider} ({tts_voice}){RESET}")
-    print(f"    - Image Engine:   {CYAN}{image_model}{RESET}")
+    print(f"    - Image Engine:   {CYAN}{image_engine.upper()} ({image_model}){RESET}")
     print(f"    - Video Engine:   {CYAN}{video_backend}{RESET}")
 
     print(f"\n{BOLD}--- [2/3] Service Reachability Checks ---{RESET}")
@@ -336,14 +393,17 @@ def run_preflight_checks(env_vars: Dict[str, str], backend_port: int, frontend_p
         print(f"      1. Start Ollama in a separate terminal: {BOLD}ollama serve{RESET}")
         print(f"      2. Pull model if needed: {BOLD}ollama pull {model_name}{RESET}")
 
-    # Local Image Bridge check (port 8001)
-    img_url = env_vars.get("NEWAPI_BASE_URL", "http://127.0.0.1:8001/v1")
+    # Local Image Bridge check (port 8001 or image_port)
+    img_url = env_vars.get("NEWAPI_BASE_URL", f"http://127.0.0.1:{image_port}/v1")
     img_ok, img_info = check_image_server(img_url)
     if img_ok:
         log_ok(f"Local Image Bridge ({img_url}): {img_info}")
     else:
-        log_warn(f"Local Image Bridge is offline or unreachable at {img_url}")
-        print(f"    {YELLOW}↳ Tip: Start image bridge via: python scripts/local_image_server.py --port 8001{RESET}")
+        if check_only:
+            log_warn(f"Local Image Bridge is offline at {img_url}")
+            print(f"    {DIM}↳ Note: Will be automatically started on port {image_port} when run without --check-only.{RESET}")
+        else:
+            log_info(f"Local Image Bridge ({img_url}) will be started automatically on port {image_port}.")
 
     # ComfyUI check
     comfyui_addr = env_vars.get("COMFYUI_ADDRESS", "127.0.0.1:8188")
@@ -355,6 +415,11 @@ def run_preflight_checks(env_vars: Dict[str, str], backend_port: int, frontend_p
         print(f"    {DIM}↳ Notice: ComfyUI is needed only when generating local AI video (Wan2.2/LTX).{RESET}")
 
     # Port checks
+    if is_port_in_use(image_port):
+        log_warn(f"Image Bridge port {image_port} is currently IN USE (will be recycled upon launch).")
+    else:
+        log_ok(f"Image Bridge port {image_port} is available.")
+
     if is_port_in_use(backend_port):
         log_warn(f"Backend port {backend_port} is currently IN USE!")
     else:
@@ -375,10 +440,30 @@ def main() -> None:
     )
     parser.add_argument("--backend-port", type=int, default=8780, help="Backend REST API port")
     parser.add_argument("--frontend-port", type=int, default=8080, help="Frontend UI port")
+    parser.add_argument("--image-port", type=int, default=8001, help="Local Image Bridge server port")
+    parser.add_argument(
+        "--image-engine",
+        choices=["fast", "diffusion"],
+        default=None,
+        help="Image generation engine: 'fast' (procedural canvas) or 'diffusion' (SDXL-Turbo)",
+    )
+    parser.add_argument(
+        "--image-model",
+        type=str,
+        default=None,
+        help="Diffusion model repository (default: stabilityai/sdxl-turbo)",
+    )
+    parser.add_argument(
+        "--image-steps",
+        type=int,
+        default=None,
+        help="Diffusion inference steps (default: 2)",
+    )
+    parser.add_argument("--no-image-server", action="store_true", help="Do not start local image server")
     parser.add_argument("--host", type=str, default="127.0.0.1", help="Host bind address")
     parser.add_argument("--check-only", action="store_true", help="Run pre-flight health checks and exit")
     parser.add_argument("--serve-dist", action="store_true", help="Serve built frontend/dist instead of Vite dev server")
-    parser.add_argument("--backend-only", action="store_true", help="Start only backend API server")
+    parser.add_argument("--backend-only", action="store_true", help="Start only backend API server (and image bridge)")
     parser.add_argument("--frontend-only", action="store_true", help="Start only frontend dev server")
     args = parser.parse_args()
 
@@ -388,7 +473,19 @@ def main() -> None:
 
     print_banner()
     env_vars = load_env_vars()
-    run_preflight_checks(env_vars, args.backend_port, args.frontend_port)
+
+    image_engine = (args.image_engine or env_vars.get("LOCAL_IMAGE_ENGINE", "fast")).lower().strip()
+    image_model = args.image_model or env_vars.get("LOCAL_DIFFUSION_MODEL", "stabilityai/sdxl-turbo").strip()
+    image_steps = args.image_steps if args.image_steps is not None else int(env_vars.get("LOCAL_DIFFUSION_STEPS", "2"))
+
+    run_preflight_checks(
+        env_vars=env_vars,
+        backend_port=args.backend_port,
+        frontend_port=args.frontend_port,
+        image_port=args.image_port,
+        image_engine=image_engine,
+        check_only=args.check_only,
+    )
 
     if args.check_only:
         print(f"\n{GREEN}[✓]{RESET} Pre-flight checks completed.")
@@ -397,11 +494,57 @@ def main() -> None:
     print(f"\n{BOLD}--- [3/3] Launching Local DramaClaw Services ---{RESET}")
 
     python_exe = find_python_executable()
-    log_info(f"Using Python: {python_exe}")
+    log_info(f"Using Backend Python: {python_exe}")
 
     creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
 
-    # 1. Spawn Backend API Server
+    # 1. Spawn Local Image Bridge Server
+    if not args.frontend_only and not args.no_image_server:
+        free_port_if_in_use(args.image_port)
+        image_python = find_image_python(image_engine, default_python=python_exe)
+        log_info(f"Starting Local Image Bridge ({image_engine.upper()}) on http://{args.host}:{args.image_port} ...")
+        log_info(f"Image Bridge Python: {image_python}")
+        image_cmd = [
+            image_python,
+            str(REPO_ROOT / "scripts" / "local_image_server.py"),
+            "--host",
+            args.host,
+            "--port",
+            str(args.image_port),
+            "--engine",
+            image_engine,
+            "--model",
+            image_model,
+            "--steps",
+            str(image_steps),
+        ]
+        image_proc = subprocess.Popen(
+            image_cmd,
+            cwd=str(REPO_ROOT),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            creationflags=creationflags,
+        )
+        ACTIVE_PROCESSES.append(image_proc)
+
+        t_image = threading.Thread(
+            target=stream_logs,
+            args=(image_proc.stdout, "IMAGE", YELLOW),
+            daemon=True,
+        )
+        t_image.start()
+
+        # Wait for image bridge to respond to health check
+        for _ in range(20):
+            ok, _ = check_image_server(f"http://{args.host}:{args.image_port}")
+            if ok:
+                log_ok(f"Local Image Bridge is ready on http://{args.host}:{args.image_port}")
+                break
+            time.sleep(0.2)
+
+    # 2. Spawn Backend API Server
     if not args.frontend_only:
         backend_cmd = [
             python_exe,
@@ -432,7 +575,7 @@ def main() -> None:
         )
         t_backend.start()
 
-    # 2. Spawn Frontend
+    # 3. Spawn Frontend
     if not args.backend_only:
         if args.serve_dist:
             if not FRONTEND_DIST.is_dir():
@@ -488,6 +631,8 @@ def main() -> None:
     print(f"  • Frontend UI:  {CYAN}http://{args.host}:{args.frontend_port}{RESET}")
     print(f"  • REST API:     {CYAN}http://{args.host}:{args.backend_port}/api/v1{RESET}")
     print(f"  • API Docs:     {CYAN}http://{args.host}:{args.backend_port}/docs{RESET}")
+    if not args.no_image_server:
+        print(f"  • Image Bridge: {CYAN}http://{args.host}:{args.image_port}/v1{RESET} [{image_engine.upper()}]")
     print(f"\nPress {YELLOW}Ctrl+C{RESET} at any time to shut down all processes cleanly.\n")
 
     try:

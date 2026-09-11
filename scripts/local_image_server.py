@@ -8,10 +8,10 @@ Exposes OpenAI-compatible image generation endpoints:
     POST /images/edits
     GET  /health
 
-Runs on port 8001 with sub-2-second response latency.
-Generates vertical 9:16 (720x1280) cinematic storyboard frames with
-high-resolution procedural art, prompt typography, atmospheric lighting,
-and optional Diffusers/SD backend support.
+Supports dual engines on NVIDIA RTX 3090:
+    1. fast (default for testing/draft): Instant PIL procedural canvas with rich gradients and scene metadata.
+    2. diffusion (production): Diffusers AutoPipelineForText2Image with SDXL-Turbo (or SD-Turbo) in float16/bfloat16.
+       Automatically falls back to fast mode if PyTorch/CUDA is unavailable.
 """
 
 from __future__ import annotations
@@ -49,11 +49,107 @@ PALETTES = [
     ((10, 22, 18), (20, 48, 38), (60, 220, 160)),
 ]
 
+# Diffusers / PyTorch availability detection
+DIFFUSERS_AVAILABLE = False
+torch_mod = None
+AutoPipeline_mod = None
+
+try:
+    import torch as _torch
+    from diffusers import AutoPipelineForText2Image as _AutoPipeline
+    torch_mod = _torch
+    AutoPipeline_mod = _AutoPipeline
+    DIFFUSERS_AVAILABLE = True
+except Exception:
+    DIFFUSERS_AVAILABLE = False
+
+_DIFFUSION_PIPELINE = None
+_DIFFUSION_LOAD_FAILED = False
+
+SERVER_CONFIG = {
+    "engine": os.environ.get("LOCAL_IMAGE_ENGINE", "fast").lower().strip(),
+    "model": os.environ.get("LOCAL_DIFFUSION_MODEL", "stabilityai/sdxl-turbo").strip(),
+    "steps": int(os.environ.get("LOCAL_DIFFUSION_STEPS", "2")),
+}
+
 
 def _pick_palette_from_text(text: str) -> Tuple[Tuple[int, int, int], Tuple[int, int, int], Tuple[int, int, int]]:
     """Deterministically pick a cinematic palette based on prompt content."""
     h = int(hashlib.md5((text or "dramaclaw").encode("utf-8")).hexdigest()[:8], 16)
     return PALETTES[h % len(PALETTES)]
+
+
+def get_diffusion_pipeline(model_name: str = "stabilityai/sdxl-turbo", device: str = "cuda:0"):
+    """Lazily initialize and return the Diffusers pipeline."""
+    global _DIFFUSION_PIPELINE, _DIFFUSION_LOAD_FAILED
+    if _DIFFUSION_PIPELINE is not None:
+        return _DIFFUSION_PIPELINE
+    if _DIFFUSION_LOAD_FAILED or not DIFFUSERS_AVAILABLE or torch_mod is None or AutoPipeline_mod is None:
+        return None
+
+    if not torch_mod.cuda.is_available():
+        print("[Diffusion] CUDA is not available. Falling back to fast procedural engine.")
+        _DIFFUSION_LOAD_FAILED = True
+        return None
+
+    try:
+        print(f"[Diffusion] Loading pipeline '{model_name}' on {device}...")
+        dtype = torch_mod.bfloat16 if torch_mod.cuda.is_bf16_supported() else torch_mod.float16
+        try:
+            pipe = AutoPipeline_mod.from_pretrained(
+                model_name,
+                torch_dtype=dtype,
+                variant="fp16",
+            )
+        except Exception:
+            pipe = AutoPipeline_mod.from_pretrained(
+                model_name,
+                torch_dtype=dtype,
+            )
+        pipe.to(device)
+        if hasattr(pipe, "enable_attention_slicing"):
+            pipe.enable_attention_slicing()
+        _DIFFUSION_PIPELINE = pipe
+        print(f"[Diffusion] Successfully initialized {model_name} on {device}!")
+        return _DIFFUSION_PIPELINE
+    except Exception as exc:
+        print(f"[Diffusion] Pipeline initialization error ({exc}). Falling back to fast procedural engine.")
+        _DIFFUSION_LOAD_FAILED = True
+        return None
+
+
+def render_diffusion_frame(
+    prompt: str,
+    width: int = 512,
+    height: int = 896,
+    model_name: str = "stabilityai/sdxl-turbo",
+    steps: int = 2,
+) -> Optional[bytes]:
+    """Generate image using local Diffusers pipeline on RTX 3090."""
+    pipe = get_diffusion_pipeline(model_name)
+    if pipe is None:
+        return None
+
+    try:
+        # Snap dimensions to multiples of 8 for diffusion unet/vae
+        w = max(256, min(1280, (width // 8) * 8))
+        h = max(256, min(1280, (height // 8) * 8))
+        guidance = 0.0 if "turbo" in model_name.lower() else 5.0
+
+        res = pipe(
+            prompt=prompt,
+            num_inference_steps=max(1, steps),
+            guidance_scale=guidance,
+            width=w,
+            height=h,
+        )
+        img = res.images[0]
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return buf.getvalue()
+    except Exception as e:
+        print(f"[Diffusion] Inference error: {e}, falling back to procedural frame")
+        return None
 
 
 def render_cinematic_storyboard_frame(
@@ -204,7 +300,7 @@ def render_cinematic_storyboard_frame(
     # 8. Footer Info
     draw.text(
         (cx, height - margin - 40),
-        f"720x1280 • 24 FPS READY • ZERO-LATENCY BRIDGE",
+        f"{width}x{height} • 24 FPS READY • ZERO-LATENCY BRIDGE",
         fill=(140, 160, 190),
         font=font_default,
         anchor="mm",
@@ -215,10 +311,39 @@ def render_cinematic_storyboard_frame(
     return buf.getvalue()
 
 
+def generate_image_bytes(
+    prompt: str,
+    width: int = 720,
+    height: int = 1280,
+    engine: str = "fast",
+    model_name: str = "stabilityai/sdxl-turbo",
+    steps: int = 2,
+) -> bytes:
+    """Generate image using selected engine (diffusion or fast procedural)."""
+    if engine.lower() == "diffusion":
+        diff_bytes = render_diffusion_frame(
+            prompt=prompt,
+            width=width,
+            height=height,
+            model_name=model_name,
+            steps=steps,
+        )
+        if diff_bytes is not None:
+            return diff_bytes
+
+    # Fast fallback
+    return render_cinematic_storyboard_frame(
+        prompt=prompt,
+        width=width,
+        height=height,
+        model_tag="Local-Bridge",
+    )
+
+
 class LocalImageBridgeHandler(BaseHTTPRequestHandler):
     """Handles standard OpenAI image generation requests."""
 
-    server_version = "DramaClawImageServer/1.0"
+    server_version = "DramaClawImageServer/2.0"
 
     def _send_json(self, status: int, data: Dict[str, Any]) -> None:
         payload = json.dumps(data).encode("utf-8")
@@ -241,10 +366,14 @@ class LocalImageBridgeHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         path = self.path.split("?")[0]
         if path in ("/", "/health", "/v1/health"):
+            cuda_ready = torch_mod.cuda.is_available() if DIFFUSERS_AVAILABLE and torch_mod else False
             self._send_json(200, {
                 "status": "ok",
                 "service": "DramaClaw Local Image Bridge",
-                "engine": "RTX-3090",
+                "engine": SERVER_CONFIG["engine"],
+                "model": SERVER_CONFIG["model"],
+                "diffusers_available": DIFFUSERS_AVAILABLE,
+                "cuda_ready": cuda_ready,
                 "port": self.server.server_port,
                 "endpoints": [
                     "/v1/images/generations",
@@ -270,6 +399,9 @@ class LocalImageBridgeHandler(BaseHTTPRequestHandler):
 
             prompt = str(body.get("prompt") or "Cinematic dramatic vertical storyboard scene").strip()
             size_str = str(body.get("size") or "720x1280").lower()
+            engine = str(body.get("engine") or SERVER_CONFIG["engine"]).lower()
+            model_name = str(body.get("model") or SERVER_CONFIG["model"])
+            steps = int(body.get("steps") or SERVER_CONFIG["steps"])
 
             width = 720
             height = 1280
@@ -281,14 +413,16 @@ class LocalImageBridgeHandler(BaseHTTPRequestHandler):
                 except Exception:
                     width, height = 720, 1280
 
-            print(f"[ImageBridge] Generating image ({width}x{height}): \"{prompt[:60]}...\"")
+            print(f"[ImageBridge] [{engine.upper()}] Generating image ({width}x{height}): \"{prompt[:60]}...\"")
             start_t = time.time()
 
-            image_bytes = render_cinematic_storyboard_frame(
+            image_bytes = generate_image_bytes(
                 prompt=prompt,
                 width=width,
                 height=height,
-                model_tag="Local-Bridge",
+                engine=engine,
+                model_name=model_name,
+                steps=steps,
             )
             b64_img = base64.b64encode(image_bytes).decode("ascii")
             elapsed = time.time() - start_t
@@ -312,12 +446,24 @@ class LocalImageBridgeHandler(BaseHTTPRequestHandler):
         pass
 
 
-def run_server(host: str = "127.0.0.1", port: int = 8001) -> None:
+def run_server(
+    host: str = "127.0.0.1",
+    port: int = 8001,
+    engine: str = "fast",
+    model: str = "stabilityai/sdxl-turbo",
+    steps: int = 2,
+) -> None:
     """Run multi-threaded local image server."""
+    SERVER_CONFIG["engine"] = engine
+    SERVER_CONFIG["model"] = model
+    SERVER_CONFIG["steps"] = steps
+
     server_address = (host, port)
     httpd = ThreadingHTTPServer(server_address, LocalImageBridgeHandler)
     print(f"★ DramaClaw Local Image Bridge running at http://{host}:{port}")
-    print(f"  Ready for OpenAI image requests on /v1/images/generations and /images/generations")
+    print(f"  • Mode:   {engine.upper()} (Diffusers available: {DIFFUSERS_AVAILABLE})")
+    print(f"  • Model:  {model}")
+    print(f"  • Endpoints: /v1/images/generations and /images/generations")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
@@ -330,5 +476,22 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="DramaClaw Local Image Bridge Server")
     parser.add_argument("--host", default="127.0.0.1", help="Host bind address")
     parser.add_argument("--port", type=int, default=8001, help="Port to listen on (default: 8001)")
+    parser.add_argument(
+        "--engine",
+        default=os.environ.get("LOCAL_IMAGE_ENGINE", "fast"),
+        choices=["fast", "diffusion"],
+        help="Image generation engine: 'fast' (procedural canvas) or 'diffusion' (SDXL-Turbo)",
+    )
+    parser.add_argument(
+        "--model",
+        default=os.environ.get("LOCAL_DIFFUSION_MODEL", "stabilityai/sdxl-turbo"),
+        help="Diffusion model repository (default: stabilityai/sdxl-turbo)",
+    )
+    parser.add_argument(
+        "--steps",
+        type=int,
+        default=int(os.environ.get("LOCAL_DIFFUSION_STEPS", "2")),
+        help="Diffusion inference steps (default: 2)",
+    )
     args = parser.parse_args()
-    run_server(args.host, args.port)
+    run_server(args.host, args.port, engine=args.engine, model=args.model, steps=args.steps)
