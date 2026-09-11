@@ -80,62 +80,58 @@ RELEASE_NOTIFICATIONS_ENABLED=false
 
 ---
 
-## 3. Starting the Backend API
+## 3. Single-Command Headless Runner (`run_local.py`)
 
-Open a PowerShell terminal and run:
+DramaClaw includes a dedicated headless local launcher that automates pre-flight health checks and concurrently spawns both the backend REST API and the frontend UI in a single command with graceful shutdown:
 
 ```powershell
-# 1. Navigate to repository root
-cd C:\Users\ansel\Documents\dramaclaw
-
-# 2. Activate Conda Environment
-conda activate dramaclaw_env
-
-# 3. Start the FastAPI REST server on port 8780
-python -m novelvideo.cli api --port 8780
+# Run from the repository root:
+conda run -n dramaclaw_env python run_local.py
 ```
 
-> **API Health Check**: Once started, verify at [http://localhost:8780/api/v1/config](http://localhost:8780/api/v1/config) or view interactive OpenAPI docs at [http://localhost:8780/docs](http://localhost:8780/docs).
+### Launcher Features & Options:
+- **Pre-flight Health Checks**: Verifies Ollama, ComfyUI, FFmpeg, Python version (>= 3.11), and port availability before launching.
+- **Graceful Shutdown**: Pressing `Ctrl+C` cleanly terminates all child process trees (node, vite, python, uvicorn) without leaving orphan background processes.
+- **Command Line Flags**:
+  - `python run_local.py --check-only`: Perform pre-flight service reachability checks and exit without starting servers.
+  - `python run_local.py --serve-dist`: Serve pre-built `frontend/dist` static assets instead of the Vite dev server.
+  - `python run_local.py --backend-port 8780`: Custom backend REST API port.
+  - `python run_local.py --frontend-port 8080`: Custom frontend UI port.
+  - `python run_local.py --backend-only` / `--frontend-only`: Launch only one service tier.
 
 ---
 
-## 4. Starting the Frontend UI
+## 4. Manual Multi-Terminal Execution (Alternative)
 
-Open a second PowerShell terminal:
+If you prefer to run services in separate terminals:
 
+### Terminal 1: Backend API
 ```powershell
-# 1. Navigate to frontend directory
-cd C:\Users\ansel\Documents\dramaclaw\frontend
+conda run -n dramaclaw_env python -m novelvideo.cli api --port 8780
+```
+> Verify at [http://localhost:8780/api/v1/config](http://localhost:8780/api/v1/config) or OpenAPI docs at [http://localhost:8780/docs](http://localhost:8780/docs).
 
-# 2. Install frontend dependencies (if not already installed)
-pnpm install
-
-# 3. Start the Vite development server on port 8080
+### Terminal 2: Frontend UI
+```powershell
+cd frontend
 pnpm dev --port 8080
 ```
-
-> **UI Access**: Open [http://localhost:8080](http://localhost:8080) in your web browser. The frontend automatically reverse-proxies `/api` and `/static` requests to the backend on port 8780.
+> Open [http://localhost:8080](http://localhost:8080) in your web browser.
 
 ---
 
-## 5. Sanity Check & Verification Commands
+## 5. End-to-End Local Pipeline Smoke Test
 
-To verify that the environment and backend components are correctly wired:
+An automated regression smoke test validates the full DramaClaw pipeline end-to-end without external cloud dependencies:
+- **Storyboard Generation**: 3-beat narrative script.
+- **Audio & Subtitles**: Live Edge-TTS synthesis generating `.mp3` audio and synchronized `.srt` subtitles.
+- **Visuals**: Storyboard frame synthesis with Pillow / MockImageGenerator.
+- **Mastering**: Video assembly, Ken Burns effect scaling, subtitle burn-in, and FFmpeg/ffprobe validation.
 
-1. **CLI Help Check**:
-   ```powershell
-   conda run -n dramaclaw_env python -m novelvideo.cli --help
-   ```
-
-2. **Backend Application Initialization Test**:
-   ```powershell
-   conda run -n dramaclaw_env python -c "from novelvideo.app import app; print('DramaClaw backend loaded successfully!')"
-   ```
-
-3. **FFmpeg Subprocess Check**:
-   ```powershell
-   ffmpeg -version
-   ```
+Execute the smoke test:
+```powershell
+conda run -n dramaclaw_env python -m pytest tests/test_local_pipeline.py -v
+```
 
 ---
 

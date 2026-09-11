@@ -455,7 +455,8 @@ class VideoComposer:
                 mode="w", suffix=".txt", delete=False
             ) as f:
                 for path in video_paths:
-                    f.write(f"file '{path}'\n")
+                    safe_path = Path(path).as_posix()
+                    f.write(f"file '{safe_path}'\n")
                 list_file = f.name
 
             try:
@@ -510,13 +511,14 @@ class VideoComposer:
                 await self._vtt_to_ass(subtitle_path, ass_path)
                 subtitle_path = ass_path
 
+            safe_sub = str(subtitle_path).replace("\\", "/").replace(":", "\\:")
             cmd = [
                 "ffmpeg",
                 "-y",
                 "-i",
                 video_path,
                 "-vf",
-                f"subtitles={subtitle_path}:force_style='{style}'",
+                f"subtitles='{safe_sub}':force_style='{style}'",
                 "-c:a",
                 "copy",
                 output_path,
