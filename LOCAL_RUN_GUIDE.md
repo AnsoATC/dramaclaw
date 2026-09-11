@@ -146,3 +146,85 @@ conda run -n dramaclaw_env python -m pytest tests/test_local_pipeline.py -v
 | **Storyboard Panel Slicing** | Native NumPy/Pillow (`grid_splitter.py`) | $0 | 0 MB (CPU) |
 | **Shot Video Motion (I2V)** | Local ComfyUI (`wan2.2-i2v-gguf-LightX2V`) | $0 | ~8–14 GB VRAM |
 | **Episode Stitching & Mastering** | Native FFmpeg subprocesses (`video_composer.py`) | $0 | 0 MB (CPU) |
+
+---
+
+## 7. Multi-Language Voice Profiles (FR & EN)
+
+DramaClaw supports multi-language voice generation via Microsoft Edge-TTS with zero cloud API keys:
+
+### Voice Catalog
+- **English (`en`)**:
+  - Narrator / Hero: `en-US-ChristopherNeural`
+  - Female Lead: `en-US-JennyNeural`
+  - Child / Kids: `en-US-AnaNeural`
+- **French (`fr`)**:
+  - Narrateur / Homme: `fr-FR-HenriNeural`
+  - Femme: `fr-FR-VivienneMultilingualNeural` (alias `fr-FR-VivienneNeural`)
+  - Enfant / Kids: `fr-FR-EloiseNeural`
+- **Chinese (`zh`)**:
+  - 解说 / Narrator: `zh-CN-YunjianNeural`
+  - 男主 / Male: `zh-CN-YunxiNeural`
+  - 女主 / Female: `zh-CN-XiaoxiaoNeural`
+  - 儿童 / Child: `zh-CN-XiaoruiNeural`
+
+### Character Voice Auto-Assignment
+The engine provides `get_character_edge_voice(gender, age_group, language, role)` in `src/novelvideo/generators/tts_generator.py`:
+- Detects the script language (`zh`, `en`, or `fr`).
+- Matches the speaker's role, age group, or gender against the catalog.
+- Transparently normalizes alias names such as `fr-FR-VivienneNeural` to the exact service name `fr-FR-VivienneMultilingualNeural`.
+
+To set default voices in `.env`:
+```ini
+EDGE_TTS_VOICE=fr-FR-HenriNeural
+EDGE_TTS_VOICE_FR_NARRATOR=fr-FR-HenriNeural
+EDGE_TTS_VOICE_FR_FEMALE=fr-FR-VivienneMultilingualNeural
+EDGE_TTS_VOICE_FR_CHILD=fr-FR-EloiseNeural
+
+EDGE_TTS_VOICE_EN_NARRATOR=en-US-ChristopherNeural
+EDGE_TTS_VOICE_EN_FEMALE=en-US-JennyNeural
+EDGE_TTS_VOICE_EN_CHILD=en-US-AnaNeural
+```
+
+---
+
+## 8. Local Image Generation Strategy ($0 Cost on RTX 3090)
+
+DramaClaw's image pipeline routes requests via `NEWAPI_BASE_URL` using standard OpenAI image API formatting (`POST /images/generations`):
+
+### Recommended Local Setup
+With a 24GB NVIDIA RTX 3090, you can run an OpenAI-compatible local image generator:
+1. **Fooocus API / SD-WebUI**:
+   - Run Fooocus API or Stable Diffusion WebUI with the OpenAI API extension exposing `http://127.0.0.1:8888/v1` or `http://127.0.0.1:7860/v1`.
+   - Set in `.env`:
+     ```ini
+     NEWAPI_BASE_URL=http://127.0.0.1:8888/v1
+     NEWAPI_API_KEY=local-key
+     ```
+2. **Recommended Aspect Ratio & Resolution**:
+   - **9:16 Vertical Video**: `720x1280` (production standard) or `512x896` (ultra-fast iteration).
+3. **Graceful Fallback**:
+   - If local image endpoints are not running or are unreachable during testing, the pipeline automatically provides clean visual frame fallbacks via Pillow to allow uninterrupted testing of audio, subtitles, and video composition.
+
+---
+
+## 9. Pilot Episode Generator (`scripts/run_pilot_story.py`)
+
+A self-contained production test script demonstrates the complete DramaClaw video pipeline with zero cloud dependencies:
+
+```powershell
+# Generate French pilot episode:
+conda run -n dramaclaw_env python scripts/run_pilot_story.py --lang fr
+
+# Or generate English pilot episode:
+conda run -n dramaclaw_env python scripts/run_pilot_story.py --lang en
+```
+
+### What the Pilot Script Does:
+1. Generates a 3-scene fantasy dramatic story with narrator and character dialogue.
+2. Synthesizes voice audio via Edge-TTS using the matching localized voice catalog.
+3. Automatically writes synchronized `.srt` subtitle files with millisecond accuracy.
+4. Synthesizes 720x1280 storyboard frames with vertical 9:16 framing and atmospheric styling.
+5. Assembles scene video clips with Ken Burns camera motion, burns localized subtitles, and concatenates the final MP4 to `data/output/pilot_episode_fr.mp4`.
+6. Inspects the final output with `ffprobe` to verify video and audio stream validity.
+

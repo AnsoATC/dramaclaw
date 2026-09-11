@@ -11,7 +11,7 @@ import langid
 from langdetect import DetectorFactory, LangDetectException, detect
 import wordninja
 
-AssetLanguage = Literal["zh", "en"]
+AssetLanguage = Literal["zh", "en", "fr"]
 
 DetectorFactory.seed = 0
 
@@ -27,11 +27,12 @@ _SHORT_ENGLISH_ACTION_RE = re.compile(
 )
 
 
-def detect_asset_language(text: str) -> AssetLanguage:
-    """Choose Chinese or English from the dominant script in ``text``.
+def detect_asset_language(text: str, *, allow_french: bool = False) -> AssetLanguage:
+    """Choose Chinese, English, or French from the dominant script in ``text``.
 
-    Chinese and English are the only languages in this contract. Any other
-    script, a tie, or empty input retains the historical Chinese default.
+    Chinese and English are the primary languages in this contract. Any other
+    unsupported script, a tie, or empty input retains the historical Chinese default.
+    Set allow_french=True to enable French detection.
     """
     raw_text = str(text or "")
     raw_lines = [line.strip() for line in raw_text.splitlines()]
@@ -59,6 +60,23 @@ def detect_asset_language(text: str) -> AssetLanguage:
     if han * 2 >= latin and han:
         return "zh"
 
+    try:
+        detected = detect(prose) if prose.strip() else ""
+    except LangDetectException:
+        detected = ""
+
+    ascii_prose = unicodedata.normalize("NFKD", prose).encode("ascii", "ignore").decode()
+    ascii_word_count = len(re.findall(r"[A-Za-z]+", ascii_prose))
+    langid_detected = langid.classify(ascii_prose)[0] if ascii_prose.strip() else ""
+
+    if allow_french:
+        if detected == "fr" or langid_detected == "fr":
+            return "fr"
+        common_french = {"le", "la", "les", "un", "une", "des", "est", "et", "dans", "il", "elle", "qui", "pour", "avec", "sur"}
+        words = set(re.findall(r"[A-Za-zÀ-ÿ]+", prose.lower()))
+        if len(words.intersection(common_french)) >= 2:
+            return "fr"
+
     short_action_match = _SHORT_ENGLISH_ACTION_RE.search(prose)
     # langdetect is intentionally conservative for tiny screenplay actions.
     # Require the inflected verb to exist in wordninja's pinned English
@@ -68,14 +86,7 @@ def detect_asset_language(text: str) -> AssetLanguage:
         and short_action_match.group("verb").lower()
         in wordninja.DEFAULT_LANGUAGE_MODEL._wordcost
     )
-    try:
-        detected = detect(prose) if prose.strip() else ""
-    except LangDetectException:
-        detected = ""
 
-    ascii_prose = unicodedata.normalize("NFKD", prose).encode("ascii", "ignore").decode()
-    ascii_word_count = len(re.findall(r"[A-Za-z]+", ascii_prose))
-    langid_detected = langid.classify(ascii_prose)[0] if ascii_prose.strip() else ""
     if detected == "en" and (langid_detected == "en" or ascii_word_count >= 3):
         return "en"
     if langid_detected == "en" and looks_like_short_english_action:
@@ -96,13 +107,24 @@ def detect_asset_language(text: str) -> AssetLanguage:
     return "zh"
 
 
-def asset_language_instruction(language: AssetLanguage) -> str:
+def detect_source_language(text: str) -> AssetLanguage:
+    """Detect language with full multi-language support (zh, en, fr)."""
+    return detect_asset_language(text, allow_french=True)
+
+
+def asset_language_instruction(language: AssetLanguage | str) -> str:
     """Return the shared language rule appended to model requests."""
     if language == "en":
         return (
             "Write every user-visible prose field in English. "
             "Keep every supplied character and location name verbatim; "
             "never translate, romanize, or rewrite a name."
+        )
+    if language == "fr":
+        return (
+            "Rédigez tous les champs de texte visibles par l'utilisateur en français. "
+            "Conservez fidèlement tous les noms de personnages et de lieux fournis ; "
+            "ne traduisez, ne romanisez et ne réécrivez jamais un nom."
         )
     return (
         "所有面向用户的自由文本字段都使用中文。"

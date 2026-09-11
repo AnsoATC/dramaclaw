@@ -12,7 +12,12 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
-from novelvideo.config import get_tts_config
+from novelvideo.config import (
+    EDGE_TTS_VOICES_BY_LANG,
+    EDGE_VOICE_ALIASES,
+    get_edge_voice,
+    get_tts_config,
+)
 from novelvideo.egress_context import TrustedEgressContext
 from novelvideo.ports.authz import AdmissionContext
 from novelvideo.ports.egress_operations import (
@@ -184,20 +189,28 @@ class VoiceInfo(BaseModel):
     locale: str
 
 
-# 推荐的中文语音
+# 推荐的多语言语音 (中、英、法)
 RECOMMENDED_VOICES = {
-    # 女声
+    # 中文女声
     "xiaoxiao": "zh-CN-XiaoxiaoNeural",  # 活泼女声（默认）
     "xiaoyi": "zh-CN-XiaoyiNeural",  # 温柔女声
     "xiaoxuan": "zh-CN-XiaoxuanNeural",  # 知性女声
     "xiaomo": "zh-CN-XiaomoNeural",  # 成熟女声
     "xiaorui": "zh-CN-XiaoruiNeural",  # 儿童女声
     "xiaoshuang": "zh-CN-XiaoshuangNeural",  # 可爱女声
-    # 男声
+    # 中文男声
     "yunxi": "zh-CN-YunxiNeural",  # 成熟男声
     "yunjian": "zh-CN-YunjianNeural",  # 解说男声
     "yunyang": "zh-CN-YunyangNeural",  # 新闻男声
     "yunhao": "zh-CN-YunhaoNeural",  # 广告男声
+    # English
+    "christopher": "en-US-ChristopherNeural",  # Male Narrator / Hero
+    "jenny": "en-US-JennyNeural",  # Female Lead
+    "ana": "en-US-AnaNeural",  # Child / Kids
+    # French
+    "henri": "fr-FR-HenriNeural",  # Narrateur / Homme
+    "vivienne": "fr-FR-VivienneMultilingualNeural",  # Femme
+    "eloise": "fr-FR-EloiseNeural",  # Enfant / Kids
 }
 
 
@@ -270,9 +283,12 @@ class EdgeTTSGenerator:
         ):
             return TTSResult(success=False, error="ORG_SERVICE_EGRESS_DENIED")
 
+        requested_voice = voice or self.voice
+        resolved_voice = EDGE_VOICE_ALIASES.get(requested_voice, requested_voice)
+
         request = {
             "text": str(text or ""),
-            "voice": voice or self.voice,
+            "voice": resolved_voice,
             "rate": rate or self.rate,
             "pitch": pitch or self.pitch,
             "generate_subtitle": bool(generate_subtitle),
@@ -299,8 +315,8 @@ class EdgeTTSGenerator:
             # 确保输出目录存在
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-            # 使用参数或默认值
-            use_voice = voice or self.voice
+            # 使用参数或默认值（经别名映射）
+            use_voice = resolved_voice
             use_rate = rate or self.rate
             use_pitch = pitch or self.pitch
 
@@ -828,15 +844,22 @@ def create_tts_generator(
         return CosyVoiceTTSGenerator(model=model, voice=voice)
 
 
-def get_voice_by_style(style: str) -> str:
-    """根据风格获取推荐语音。
+def get_voice_by_style(style: str, language: str = "zh") -> str:
+    """根据风格及语言获取推荐语音。
 
     Args:
-        style: 风格名称（narrator, storyteller, news, child, etc.）
+        style: 风格名称（narrator, storyteller, news, child, gentle, mature_female, mature_male, etc.）
+        language: 语言代码 ("zh", "en", "fr")
 
     Returns:
         语音名称
     """
+    lang = (language or "zh").lower().strip()
+    if lang.startswith("fr"):
+        return get_edge_voice(language="fr", role=style)
+    elif lang.startswith("en"):
+        return get_edge_voice(language="en", role=style)
+
     style_mapping = {
         "narrator": "zh-CN-YunjianNeural",  # 解说风格
         "storyteller": "zh-CN-XiaoxiaoNeural",  # 讲故事风格
@@ -848,3 +871,29 @@ def get_voice_by_style(style: str) -> str:
     }
 
     return style_mapping.get(style, "zh-CN-XiaoxiaoNeural")
+
+
+def get_character_edge_voice(
+    gender: str = "",
+    age_group: str = "",
+    language: str = "zh",
+    role: str = "",
+) -> str:
+    """为角色自动匹配 Edge-TTS 音色（中、英、法多语言支持）。
+
+    Args:
+        gender: 角色性别 (male, female, etc.)
+        age_group: 年龄段 (child, youth, middle, elder, etc.)
+        language: 目标语言 ("zh", "en", "fr")
+        role: 角色身份/定位 (narrator, hero, heroine, etc.)
+
+    Returns:
+        已验证的 Edge-TTS 音色短名称
+    """
+    return get_edge_voice(
+        language=language,
+        role=role,
+        gender=gender,
+        age_group=age_group,
+    )
+

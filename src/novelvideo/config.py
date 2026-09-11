@@ -667,6 +667,72 @@ VOLCENGINE_TTS_ENDPOINT = os.environ.get(
     "VOLCENGINE_TTS_ENDPOINT", "https://openspeech.bytedance.com/api/v1/tts"
 )
 
+# Multi-language Edge-TTS Voice Catalog (EN, FR, ZH)
+EDGE_TTS_VOICES_BY_LANG: dict[str, dict[str, str]] = {
+    "zh": {
+        "narrator": os.environ.get("EDGE_TTS_VOICE_ZH_NARRATOR", "zh-CN-YunjianNeural"),
+        "male": os.environ.get("EDGE_TTS_VOICE_ZH_MALE", "zh-CN-YunxiNeural"),
+        "female": os.environ.get("EDGE_TTS_VOICE_ZH_FEMALE", "zh-CN-XiaoxiaoNeural"),
+        "child": os.environ.get("EDGE_TTS_VOICE_ZH_CHILD", "zh-CN-XiaoruiNeural"),
+    },
+    "en": {
+        "narrator": os.environ.get("EDGE_TTS_VOICE_EN_NARRATOR", "en-US-ChristopherNeural"),
+        "male": os.environ.get("EDGE_TTS_VOICE_EN_MALE", "en-US-ChristopherNeural"),
+        "female": os.environ.get("EDGE_TTS_VOICE_EN_FEMALE", "en-US-JennyNeural"),
+        "child": os.environ.get("EDGE_TTS_VOICE_EN_CHILD", "en-US-AnaNeural"),
+    },
+    "fr": {
+        "narrator": os.environ.get("EDGE_TTS_VOICE_FR_NARRATOR", "fr-FR-HenriNeural"),
+        "male": os.environ.get("EDGE_TTS_VOICE_FR_MALE", "fr-FR-HenriNeural"),
+        "female": os.environ.get("EDGE_TTS_VOICE_FR_FEMALE", "fr-FR-VivienneMultilingualNeural"),
+        "child": os.environ.get("EDGE_TTS_VOICE_FR_CHILD", "fr-FR-EloiseNeural"),
+    },
+}
+
+# Edge-TTS voice alias normalization (e.g. Vivienne short name -> exact service name)
+EDGE_VOICE_ALIASES: dict[str, str] = {
+    "fr-FR-VivienneNeural": "fr-FR-VivienneMultilingualNeural",
+}
+
+
+def get_edge_voice(
+    language: str = "zh",
+    role: str = "narrator",
+    gender: str | None = None,
+    age_group: str | None = None,
+) -> str:
+    """根据语言、角色、性别和年龄段获取 Edge-TTS 推荐音色。"""
+    lang = (language or "zh").lower().strip()
+    if lang.startswith("fr"):
+        lang_key = "fr"
+    elif lang.startswith("en"):
+        lang_key = "en"
+    else:
+        lang_key = "zh"
+
+    catalog = EDGE_TTS_VOICES_BY_LANG.get(lang_key, EDGE_TTS_VOICES_BY_LANG["zh"])
+
+    if age_group and age_group.lower() in ("child", "kid", "enfant", "少儿", "儿童"):
+        return catalog.get("child", catalog["narrator"])
+
+    if gender:
+        g = gender.lower()
+        if "fem" in g or "女" in g:
+            return catalog.get("female", catalog["narrator"])
+        if "male" in g or "男" in g or "homme" in g:
+            return catalog.get("male", catalog["narrator"])
+
+    r = (role or "narrator").lower().strip()
+    if r in ("female", "heroine", "femme", "woman"):
+        return catalog.get("female", catalog["narrator"])
+    if r in ("male", "hero", "homme", "man"):
+        return catalog.get("male", catalog["narrator"])
+    if r in ("child", "kid", "enfant"):
+        return catalog.get("child", catalog["narrator"])
+
+    voice = catalog.get(r, catalog.get("narrator", EDGE_TTS_VOICE))
+    return EDGE_VOICE_ALIASES.get(voice, voice)
+
 # CosyVoice 配置（阿里云 DashScope）
 COSYVOICE_MODEL = os.environ.get("COSYVOICE_MODEL", "cosyvoice-v3-flash")
 COSYVOICE_VOICE = os.environ.get("COSYVOICE_VOICE", "longxiaoxia_v3")
@@ -695,6 +761,8 @@ def get_tts_config() -> dict:
         "default_voice": EDGE_TTS_VOICE,
         "rate": os.environ.get("TTS_RATE", "+0%"),
         "pitch": os.environ.get("TTS_PITCH", "+0Hz"),
+        "voices_by_lang": EDGE_TTS_VOICES_BY_LANG,
+        "voice_aliases": EDGE_VOICE_ALIASES,
         "volcengine_endpoint": VOLCENGINE_TTS_ENDPOINT,
         "volcengine_api_key": VOLCENGINE_VISUAL_API_KEY,
         # CosyVoice

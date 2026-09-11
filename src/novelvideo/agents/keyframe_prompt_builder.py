@@ -195,6 +195,9 @@ class KeyframePromptBuilder:
         if language == "en":
             output_label = "English"
             length_target = "4-6 sentences, ~50-90 words"
+        elif language == "fr":
+            output_label = "French (Français)"
+            length_target = "4-6 phrases, ~50-90 mots"
         else:
             output_label = "Chinese (中文)"
             length_target = "4-6 句, ~50-90 字"
@@ -293,6 +296,8 @@ Output the transition prompt in {output_label} directly."""
             if audio_type == "dialogue" and dialogue_line:
                 if language == "en":
                     result = f'{result} Says: "{dialogue_line}"'
+                elif language == "fr":
+                    result = f'{result} Dit : « {dialogue_line} »'
                 else:
                     result = f"{result}，说：{dialogue_line}"
             return result
@@ -311,6 +316,11 @@ Output the transition prompt in {output_label} directly."""
             return (
                 "The character adjusts their posture naturally as the camera "
                 "tracks the movement into a smooth transition."
+            )
+        elif language == "fr":
+            return (
+                "Le personnage ajuste naturellement sa posture tandis que la caméra "
+                "suit le mouvement dans une transition fluide."
             )
         return "角色姿态自然调整，身体轻微移动，镜头平稳跟随，场景渐变过渡。"
 

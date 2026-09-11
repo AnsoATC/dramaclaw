@@ -278,6 +278,8 @@ class VideoPromptBuilder:
             if audio_type == "dialogue" and dialogue_line:
                 if language == "en":
                     result = f'{result} Says: "{dialogue_line}"'
+                elif language == "fr":
+                    result = f'{result} Dit : « {dialogue_line} »'
                 else:
                     result = f"{result}，说：{dialogue_line}"
             return result
@@ -309,6 +311,15 @@ class VideoPromptBuilder:
                 word_target = "50-75 words"
             else:
                 word_target = "65-90 words"
+        elif language == "fr":
+            output_label = "French (Français)"
+            sentence_target = "4-6 phrases"
+            if duration <= 4:
+                word_target = "35-50 mots"
+            elif duration <= 6:
+                word_target = "50-75 mots"
+            else:
+                word_target = "65-90 mots"
         else:
             output_label = "Chinese (中文)"
             sentence_target = "4-6 句"
@@ -403,6 +414,8 @@ Output the motion prompt in {output_label} directly. No explanation.
         """回退方案：根据规则生成默认运动提示词。"""
         if language == "en":
             return "The character moves naturally as the camera follows the action."
+        elif language == "fr":
+            return "Le personnage bouge naturellement tandis que la caméra suit l'action."
         return "角色自然动作，姿态变化，自然镜头运动"
 
 
