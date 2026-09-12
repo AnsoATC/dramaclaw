@@ -53,6 +53,9 @@ export function PosterColumn({
                 fetchPriority={i === 0 ? "high" : "auto"}
                 decoding="async"
                 className={styles.tileImg}
+                onError={(e) => {
+                  e.currentTarget.style.opacity = "0";
+                }}
               />
             </picture>
           </div>

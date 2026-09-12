@@ -72,6 +72,9 @@ export function LoginModal({ open, onClose }: LoginModalProps) {
                 loop
                 preload="metadata"
                 aria-hidden="true"
+                onError={(e) => {
+                  e.currentTarget.style.display = "none";
+                }}
               />
               <div className={styles.loginMediaShade} aria-hidden="true" />
               <div className={styles.loginMediaCopy}>

@@ -19,11 +19,24 @@ from novelvideo.ports.auth_contract import (
 
 class FileAuthPort:
     async def verify_session(self, raw_cookie: str | None) -> dict:
+        if raw_cookie and raw_cookie.strip():
+            from novelvideo.user_store import get_session
+            sess = get_session(raw_cookie)
+            if sess:
+                return AuthenticatedUser(
+                    id=sess["user_id"],
+                    username=sess["username"],
+                    role=sess["role"],
+                ).to_legacy_dict()
+            raise AuthError(AuthFailureReason.INVALID, "session expired")
+
         username = os.environ.get("ST_LOCAL_USERNAME", "").strip() or "local"
         return AuthenticatedUser(id="local", username=username, role="owner").to_legacy_dict()
 
     async def revoke_session(self, raw_cookie: str) -> None:
-        return None
+        if raw_cookie:
+            from novelvideo.user_store import revoke_session as _revoke
+            _revoke(raw_cookie)
 
 
 class LocalAuthSession:

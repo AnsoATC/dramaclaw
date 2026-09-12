@@ -4,6 +4,7 @@ import logging
 
 from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 from novelvideo.api.auth import (
     AUTH_COOKIE_NAME,
@@ -44,6 +45,41 @@ def _clear_auth_cookie(response: Response) -> None:
         samesite="lax",
         secure=_cookie_secure(),
     )
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+@router.post("/auth/login")
+async def login(body: LoginRequest, response: Response):
+    """Authenticate user with username/email and password."""
+    from novelvideo.user_store import authenticate_user, create_session
+
+    user = authenticate_user(body.username, body.password)
+    if not user:
+        return JSONResponse(
+            status_code=401,
+            content={"ok": False, "error": "Invalid username or password"},
+        )
+
+    token = create_session(user["id"], user["username"], user["role"])
+    res = JSONResponse(
+        {
+            "ok": True,
+            "data": {
+                "id": user["id"],
+                "username": user["username"],
+                "email": user["email"],
+                "role": user["role"],
+                "credit_balance": 10000,
+                "credential_kind": "browser_session",
+            },
+        }
+    )
+    _set_auth_cookie(res, token)
+    return res
 
 
 @router.post("/auth/logout")

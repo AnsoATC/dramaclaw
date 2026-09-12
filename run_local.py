@@ -123,10 +123,12 @@ def find_image_python(engine: str = "fast", default_python: str = sys.executable
     if engine != "diffusion":
         return default_python
 
+    story_flux_win = r"C:\Users\ansel\miniconda3\envs\story_flux\python.exe"
     candidates = [
-        default_python,
+        story_flux_win if sys.platform == "win32" and Path(story_flux_win).is_file() else None,
         str(Path.home() / "miniconda3" / "envs" / "story_flux" / ("python.exe" if sys.platform == "win32" else "bin/python")),
         str(Path.home() / "miniconda3" / "envs" / "dramaclaw_env" / ("python.exe" if sys.platform == "win32" else "bin/python")),
+        default_python,
     ]
     for cand in candidates:
         if cand and Path(cand).is_file():
@@ -135,7 +137,7 @@ def find_image_python(engine: str = "fast", default_python: str = sys.executable
                     [cand, "-c", "import torch, diffusers; print('ok' if torch.cuda.is_available() else 'no_cuda')"],
                     capture_output=True,
                     text=True,
-                    timeout=4,
+                    timeout=5,
                 )
                 if res.returncode == 0 and "ok" in res.stdout:
                     return cand

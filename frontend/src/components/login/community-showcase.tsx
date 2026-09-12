@@ -44,7 +44,11 @@ function CommunityCard({ work }: { work: LoginCommunityWork }) {
             src={work.cover}
             alt=""
             loading="lazy"
+            decoding="async"
             aria-hidden="true"
+            onError={(e) => {
+              e.currentTarget.style.display = "none";
+            }}
           />
         ) : null}
         {work.preview ? (
@@ -60,6 +64,9 @@ function CommunityCard({ work }: { work: LoginCommunityWork }) {
             playsInline
             preload="none"
             aria-hidden="true"
+            onError={(e) => {
+              e.currentTarget.style.display = "none";
+            }}
           />
         ) : null}
         <div className={styles.communityCoverShade} aria-hidden="true" />
